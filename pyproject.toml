@@ -1,0 +1,15 @@
+[project]
+name = "buddy"
+version = "0.1.0"
+description = "Accountability Buddy - a Discord bot for goal tracking and check-ins"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "apscheduler>=3.11.2",
+    "discord-py[voice]>=2.7.1",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+buddy = "main:main"
