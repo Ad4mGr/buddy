@@ -5,19 +5,22 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 from bot import config
-from bot.goals import get_goals_due_for_checkin, mark_jobs_sent
+from bot.goals import get_goals_due_for_checkin, mark_jobs_sent, get_goals_past_deadline
+from bot.checkins import expire_old_scheduled_jobs
 
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 _bot_instance = None
 _send_checkin_callback = None
+_deadline_callback = None
 
 
-def setup(bot_instance, send_checkin_cb):
-    global _scheduler, _bot_instance, _send_checkin_callback
+def setup(bot_instance, send_checkin_cb, deadline_cb):
+    global _scheduler, _bot_instance, _send_checkin_callback, _deadline_callback
     _bot_instance = bot_instance
     _send_checkin_callback = send_checkin_cb
+    _deadline_callback = deadline_cb
 
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(
@@ -46,20 +49,29 @@ def add_digest_job(callback, day: str = "sun", hour: int = 9):
 
 async def _process_pending_checkins():
     try:
+        await expire_old_scheduled_jobs()
+
         jobs = await get_goals_due_for_checkin()
-        if not jobs:
-            return
+        if jobs:
+            goal_ids = [j["goal_id"] for j in jobs]
+            await mark_jobs_sent(goal_ids)
+            for job in jobs:
+                if _send_checkin_callback:
+                    try:
+                        job["_bot"] = _bot_instance
+                        await _send_checkin_callback(job)
+                    except Exception as e:
+                        logger.error("Failed to send check-in for goal %s: %s", job["goal_id"], e)
 
-        goal_ids = [j["goal_id"] for j in jobs]
-        await mark_jobs_sent(goal_ids)
-
-        for job in jobs:
-            if _send_checkin_callback:
+        if _deadline_callback:
+            past_deadline = await get_goals_past_deadline()
+            for g in past_deadline:
                 try:
-                    job["_bot"] = _bot_instance
-                    await _send_checkin_callback(job)
+                    g["_bot"] = _bot_instance
+                    await _deadline_callback(g)
                 except Exception as e:
-                    logger.error("Failed to send check-in for goal %s: %s", job["goal_id"], e)
+                    logger.error("Failed to process deadline for goal %s: %s", g["id"], e)
+
     except Exception as e:
         logger.error("Error in check-in processor: %s", e)
 

@@ -32,7 +32,6 @@ async def create_goal(
         ),
     )
     goal_id = cursor.lastrowid
-
     await db.execute(
         "INSERT INTO streaks (goal_id) VALUES (?)", (goal_id,)
     )
@@ -74,9 +73,7 @@ async def get_user_goals(
     return [dict(r) for r in rows]
 
 
-async def get_server_goals(
-    server_id: str, status: Optional[str] = "active"
-) -> list[dict]:
+async def get_server_goals(server_id: str, status: Optional[str] = "active") -> list[dict]:
     db = await get_db()
     query = """SELECT g.*, s.current_streak, s.longest_streak,
                       s.last_checkin_date
@@ -100,7 +97,7 @@ async def update_goal(goal_id: int, **kwargs) -> bool:
     sets = ", ".join(f"{k} = ?" for k in kwargs)
     values = list(kwargs.values()) + [goal_id]
     cursor = await db.execute(
-        f"UPDATE goals SET {sets} WHERE id = ?", values
+        f"UPDATE goals SET {sets} WHERE id = ?", values,
     )
     await db.commit()
     return cursor.rowcount > 0
@@ -108,7 +105,9 @@ async def update_goal(goal_id: int, **kwargs) -> bool:
 
 async def delete_goal(goal_id: int) -> bool:
     db = await get_db()
-    cursor = await db.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+    cursor = await db.execute(
+        "DELETE FROM goals WHERE id = ?", (goal_id,),
+    )
     await db.commit()
     return cursor.rowcount > 0
 
@@ -121,6 +120,30 @@ async def complete_goal(goal_id: int, achieved: bool = True) -> bool:
     )
     await db.commit()
     return cursor.rowcount > 0
+
+
+async def abandon_goal(goal_id: int) -> bool:
+    db = await get_db()
+    cursor = await db.execute(
+        "UPDATE goals SET status = 'abandoned', end_date = date('now') WHERE id = ? AND status = 'active'",
+        (goal_id,),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def get_goals_past_deadline() -> list[dict]:
+    db = await get_db()
+    cursor = await db.execute(
+        """SELECT g.*, u.timezone
+           FROM goals g
+           JOIN users u ON u.discord_id = g.discord_id
+           WHERE g.status = 'active'
+             AND g.end_date IS NOT NULL
+             AND g.end_date = date('now')""",
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def get_goals_due_for_checkin() -> list[dict]:
@@ -141,6 +164,8 @@ async def get_goals_due_for_checkin() -> list[dict]:
 
 
 async def mark_jobs_sent(goal_ids: list[int]):
+    if not goal_ids:
+        return
     db = await get_db()
     placeholders = ", ".join("?" for _ in goal_ids)
     await db.execute(

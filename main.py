@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from bot import config, scheduler
-from bot.cogs.checkins import send_checkin_dm
+from bot.cogs.checkins import send_checkin_dm, send_deadline_dm
 from bot.cogs.social import generate_digest
 from bot.database import close_db, get_db
 
@@ -22,7 +22,7 @@ class BuddyBot(commands.Bot):
     async def setup_hook(self):
         await get_db()
 
-        scheduler.setup(self, send_checkin_dm)
+        scheduler.setup(self, send_checkin_dm, send_deadline_dm)
         scheduler.add_digest_job(lambda: generate_digest(self))
 
         for ext in ("setup", "goals", "checkins", "social"):

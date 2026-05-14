@@ -26,8 +26,6 @@ async def update_streak(goal_id: int, checkin_status: str):
     if checkin_status == "done":
         if last_date == today:
             return
-        if last_date and last_date == (date.today().isoformat()):
-            pass
         new_streak = current + 1
         new_longest = max(longest, new_streak)
         await db.execute(
@@ -37,11 +35,18 @@ async def update_streak(goal_id: int, checkin_status: str):
                WHERE goal_id = ?""",
             (new_streak, new_longest, today, goal_id),
         )
-    elif checkin_status in ("missed", "skipped"):
+    elif checkin_status == "missed":
         await db.execute(
             """UPDATE streaks
                SET current_streak = 0, last_checkin_date = ?,
                    updated_at = datetime('now')
+               WHERE goal_id = ?""",
+            (today, goal_id),
+        )
+    elif checkin_status == "skipped":
+        await db.execute(
+            """UPDATE streaks
+               SET last_checkin_date = ?, updated_at = datetime('now')
                WHERE goal_id = ?""",
             (today, goal_id),
         )

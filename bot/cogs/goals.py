@@ -2,8 +2,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.goals import create_goal, get_goal, get_user_goals, delete_goal, complete_goal
-from bot.checkins import get_checkin_history
+from bot.goals import (
+    create_goal, get_goal, get_user_goals, delete_goal,
+    complete_goal, abandon_goal, update_goal,
+)
+from bot.checkins import get_checkin_history, get_checkin_stats
 from bot.scheduler import schedule_next_checkin
 from bot.database import get_db
 
@@ -36,6 +39,8 @@ class GoalsCog(commands.Cog):
         checkin_hour="Hour to receive check-in DM (0-23, default 21=9PM)",
         end_date="Deadline (YYYY-MM-DD)",
         stake_miss_count="Miss this many check-ins and face the stake",
+        stake_role="Role to lose if you miss the stake (select a role)",
+        stake_public_shame="Public shame ping when stake is triggered",
     )
     @app_commands.choices(category=CATEGORIES, frequency=FREQUENCIES)
     async def goal_set(
@@ -48,6 +53,8 @@ class GoalsCog(commands.Cog):
         checkin_hour: int = 21,
         end_date: str = None,
         stake_miss_count: int = None,
+        stake_role: discord.Role = None,
+        stake_public_shame: bool = False,
     ):
         await interaction.response.defer(ephemeral=True)
 
@@ -69,6 +76,12 @@ class GoalsCog(commands.Cog):
         else:
             timezone = user["timezone"]
 
+        if timezone == "UTC" and not user:
+            await interaction.followup.send(
+                "⚠️ Your timezone is set to UTC. Use `/set-timezone` to set your local time for accurate check-in scheduling.",
+                ephemeral=True,
+            )
+
         goal_id = await create_goal(
             discord_id=discord_id,
             server_id=str(interaction.guild_id),
@@ -80,8 +93,8 @@ class GoalsCog(commands.Cog):
             checkin_hour=checkin_hour,
             end_date=end_date,
             stake_miss_count=stake_miss_count,
-            stake_role_id=None,
-            stake_public_shame=False,
+            stake_role_id=str(stake_role.id) if stake_role else None,
+            stake_public_shame=stake_public_shame,
         )
 
         await schedule_next_checkin(goal_id, discord_id, interval_days, checkin_hour, timezone)
@@ -97,7 +110,12 @@ class GoalsCog(commands.Cog):
         if end_date:
             embed.add_field(name="Deadline", value=end_date, inline=True)
         if stake_miss_count:
-            embed.add_field(name="Stake", value=f"Miss {stake_miss_count} check-ins → penalty", inline=True)
+            parts = [f"Miss {stake_miss_count} check-ins"]
+            if stake_role:
+                parts.append(f"lose {stake_role.mention}")
+            if stake_public_shame:
+                parts.append("public shame ping")
+            embed.add_field(name="Stake", value=" → ".join(parts), inline=True)
         embed.set_footer(text="You'll get a DM when it's time to check in!")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -127,8 +145,49 @@ class GoalsCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="goal-edit", description="Edit an existing goal")
+    @app_commands.describe(
+        goal_id="ID of the goal to edit",
+        title="New title",
+        description="New description",
+        checkin_hour="New check-in hour (0-23)",
+        end_date="New deadline (YYYY-MM-DD)",
+    )
+    async def goal_edit(
+        self,
+        interaction: discord.Interaction,
+        goal_id: int,
+        title: str = None,
+        description: str = None,
+        checkin_hour: int = None,
+        end_date: str = None,
+    ):
+        goal = await get_goal(goal_id)
+        if not goal or goal["discord_id"] != str(interaction.user.id):
+            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            return
+
+        kwargs = {}
+        if title is not None:
+            kwargs["title"] = title
+        if description is not None:
+            kwargs["description"] = description
+        if checkin_hour is not None:
+            kwargs["checkin_hour"] = checkin_hour
+        if end_date is not None:
+            kwargs["end_date"] = end_date
+
+        if not kwargs:
+            await interaction.response.send_message("Nothing to edit.", ephemeral=True)
+            return
+
+        await update_goal(goal_id, **kwargs)
+        await interaction.response.send_message(
+            f"Goal **{goal['title']}** updated! ✅", ephemeral=True,
+        )
+
     @app_commands.command(name="goal-delete", description="Delete a goal")
-    @app_commands.describe(goal_id="ID of the goal to delete (use /goals to find it)")
+    @app_commands.describe(goal_id="ID of the goal to delete")
     async def goal_delete(self, interaction: discord.Interaction, goal_id: int):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
@@ -138,17 +197,22 @@ class GoalsCog(commands.Cog):
         await delete_goal(goal_id)
         await interaction.response.send_message(f"Goal **{goal['title']}** deleted.", ephemeral=True)
 
+    @app_commands.command(name="goal-abandon", description="Mark a goal as abandoned")
+    @app_commands.describe(goal_id="ID of the goal to abandon")
+    async def goal_abandon(self, interaction: discord.Interaction, goal_id: int):
+        goal = await get_goal(goal_id)
+        if not goal or goal["discord_id"] != str(interaction.user.id):
+            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            return
+
+        await abandon_goal(goal_id)
+        await interaction.response.send_message(
+            f"Goal **{goal['title']}** marked as abandoned.", ephemeral=True,
+        )
+
     @app_commands.command(name="goal-complete", description="Mark a goal as completed")
-    @app_commands.describe(
-        goal_id="ID of the goal to complete",
-        achieved="Did you achieve your goal?",
-    )
-    async def goal_complete(
-        self,
-        interaction: discord.Interaction,
-        goal_id: int,
-        achieved: bool = True,
-    ):
+    @app_commands.describe(goal_id="ID of the goal to complete", achieved="Did you achieve your goal?")
+    async def goal_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool = True):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
             await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
@@ -165,17 +229,14 @@ class GoalsCog(commands.Cog):
         embed.add_field(name="Final streak", value=f"{goal['current_streak']} days", inline=True)
 
         if achieved:
-            channel_id = None
-            row = await (await get_db()).execute(
+            db = await get_db()
+            row = await db.execute(
                 "SELECT accountability_channel_id FROM server_config WHERE server_id = ?",
                 (str(interaction.guild_id),),
             )
             cfg = await row.fetchone()
             if cfg and cfg["accountability_channel_id"]:
-                channel_id = cfg["accountability_channel_id"]
-
-            if channel_id:
-                channel = self.bot.get_channel(int(channel_id))
+                channel = self.bot.get_channel(int(cfg["accountability_channel_id"]))
                 if channel:
                     await channel.send(
                         f"🎉 {interaction.user.mention} completed their goal **{goal['title']}**! "
@@ -193,6 +254,7 @@ class GoalsCog(commands.Cog):
             return
 
         checkins = await get_checkin_history(goal_id, limit=10)
+        stats = await get_checkin_stats(goal_id)
 
         embed = discord.Embed(
             title=goal["title"],
@@ -205,6 +267,20 @@ class GoalsCog(commands.Cog):
         embed.add_field(name="Current Streak", value=f"🔥 {goal['current_streak']} days", inline=True)
         embed.add_field(name="Longest Streak", value=f"🏆 {goal['longest_streak']} days", inline=True)
         embed.add_field(name="Freeze Tokens", value=f"🧊 {goal.get('freeze_tokens', 0)}", inline=True)
+        embed.add_field(
+            name="Consistency",
+            value=f"📊 {stats['consistency']}% ({stats['done']}/{stats['total']} check-ins)",
+            inline=True,
+        )
+
+        if goal.get("end_date"):
+            embed.add_field(name="Deadline", value=goal["end_date"], inline=True)
+
+        if goal.get("stake_miss_count"):
+            parts = [f"Miss {goal['stake_miss_count']} → penalty"]
+            if goal.get("stake_role_id"):
+                parts.append(f"Role: <@&{goal['stake_role_id']}>")
+            embed.add_field(name="Stake", value=" | ".join(parts), inline=True)
 
         if checkins:
             recent = "\n".join(
