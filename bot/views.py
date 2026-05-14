@@ -7,8 +7,8 @@ from bot.checkins import (
     post_to_accountability_channel,
     grant_freeze_token,
 )
-from bot.streaks import check_milestone
 from bot.goals import get_goal
+from bot.streaks import check_milestone
 
 
 class CheckinView(discord.ui.View):
@@ -98,3 +98,34 @@ class CheckinView(discord.ui.View):
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
+
+
+class GoalSelectView(discord.ui.View):
+    def __init__(self, goals: list[dict], author_id: int, action_label: str, callback, timeout=120):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.callback = callback
+        self.selected_goal_id = None
+
+        options = [
+            discord.SelectOption(
+                label=f"{g['title'][:90]}",
+                description=f"🔥 {g['current_streak']}d · {g['category']}",
+                value=str(g['id']),
+            )
+            for g in goals[:25]
+        ]
+        self.select = discord.ui.Select(
+            placeholder=f"Select a goal to {action_label}...",
+            options=options,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This menu isn't for you.", ephemeral=True)
+            return
+        self.selected_goal_id = int(self.select.values[0])
+        await self.callback(interaction, self.selected_goal_id)
+        self.stop()

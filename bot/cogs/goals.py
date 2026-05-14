@@ -9,6 +9,7 @@ from bot.goals import (
 from bot.checkins import get_checkin_history, get_checkin_stats
 from bot.scheduler import schedule_next_checkin
 from bot.database import get_db
+from bot.views import GoalSelectView
 
 CATEGORIES = [
     app_commands.Choice(name="Fitness", value="fitness"),
@@ -35,6 +36,19 @@ async def goal_autocomplete(interaction: discord.Interaction, current: str) -> l
         )
         for g in goals if current.lower() in g['title'].lower()
     ][:25]
+
+
+async def require_goal(interaction: discord.Interaction, goal_id: int | None, label: str, handler):
+    if goal_id is not None:
+        return await handler(interaction, goal_id)
+    goals = await get_user_goals(str(interaction.user.id), status="active")
+    if not goals:
+        await interaction.response.send_message(
+            "You have no active goals. Use `/goal` to set one!", ephemeral=True,
+        )
+        return
+    view = GoalSelectView(goals, interaction.user.id, label, handler)
+    await interaction.response.send_message("Select a goal:", view=view, ephemeral=True)
 
 
 class GoalsCog(commands.Cog):
@@ -89,7 +103,7 @@ class GoalsCog(commands.Cog):
 
         if timezone == "UTC" and not user:
             await interaction.followup.send(
-                "⚠️ Your timezone is set to UTC. Use `/set-timezone` to set your local time for accurate check-in scheduling.",
+                "⚠️ Your timezone is set to UTC. Use `/set-timezone` to set your local time.",
                 ephemeral=True,
             )
 
@@ -134,118 +148,84 @@ class GoalsCog(commands.Cog):
     @app_commands.command(name="goals", description="List your active goals")
     async def goal_list(self, interaction: discord.Interaction):
         goals = await get_user_goals(str(interaction.user.id), status="active")
-
         if not goals:
             await interaction.response.send_message(
-                "You have no active goals. Use `/goal` to set one!", ephemeral=True
+                "You have no active goals. Use `/goal` to set one!", ephemeral=True,
             )
             return
 
-        embed = discord.Embed(
-            title="Your Goals",
-            color=discord.Color.blue(),
-        )
+        embed = discord.Embed(title="Your Goals", color=discord.Color.blue())
         for g in goals:
-            streak = g["current_streak"]
-            streak_str = f"🔥 {streak} day{'s' if streak != 1 else ''}" if streak > 0 else "Not started"
+            s = g["current_streak"]
+            streak_str = f"🔥 {s}d" if s > 0 else "Not started"
             embed.add_field(
                 name=f"{g['title']} ({g['category']})",
-                value=f"Streak: {streak_str}\nFrequency: {g['frequency'].replace('_', ' ')}\nID: `{g['id']}`",
+                value=f"Streak: {streak_str}  |  ID: `{g['id']}`",
                 inline=False,
             )
-
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="goal-edit", description="Edit an existing goal")
+    # ── Status ──────────────────────────────────────────────
+
+    @app_commands.command(name="goal-status", description="View detailed status of a goal")
     @app_commands.autocomplete(goal_id=goal_autocomplete)
-    @app_commands.describe(
-        goal_id="ID of the goal to edit",
-        title="New title",
-        description="New description",
-        checkin_hour="New check-in hour (0-23)",
-        end_date="New deadline (YYYY-MM-DD)",
-    )
-    async def goal_edit(
-        self,
-        interaction: discord.Interaction,
-        goal_id: int,
-        title: str = None,
-        description: str = None,
-        checkin_hour: int = None,
-        end_date: str = None,
-    ):
+    async def goal_status(self, interaction: discord.Interaction, goal_id: int = None):
+        await require_goal(interaction, goal_id, "view", self._show_goal_status)
+
+    async def _show_goal_status(self, interaction: discord.Interaction, goal_id: int):
         goal = await get_goal(goal_id)
-        if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+        if not goal:
+            await interaction.response.send_message("Goal not found!", ephemeral=True)
             return
 
-        kwargs = {}
-        if title is not None:
-            kwargs["title"] = title
-        if description is not None:
-            kwargs["description"] = description
-        if checkin_hour is not None:
-            kwargs["checkin_hour"] = checkin_hour
-        if end_date is not None:
-            kwargs["end_date"] = end_date
+        checkins = await get_checkin_history(goal_id, limit=10)
+        stats = await get_checkin_stats(goal_id)
 
-        if not kwargs:
-            await interaction.response.send_message("Nothing to edit.", ephemeral=True)
-            return
+        embed = discord.Embed(title=goal["title"], description=goal.get("description") or "", color=discord.Color.blue())
+        embed.add_field(name="Category", value=goal["category"].capitalize(), inline=True)
+        embed.add_field(name="Frequency", value=goal["frequency"].replace("_", " ").title(), inline=True)
+        embed.add_field(name="Status", value=goal["status"].capitalize(), inline=True)
+        embed.add_field(name="Current Streak", value=f"🔥 {goal['current_streak']} days", inline=True)
+        embed.add_field(name="Longest Streak", value=f"🏆 {goal['longest_streak']} days", inline=True)
+        embed.add_field(name="Freeze Tokens", value=f"🧊 {goal.get('freeze_tokens', 0)}", inline=True)
+        embed.add_field(name="Consistency", value=f"📊 {stats['consistency']}% ({stats['done']}/{stats['total']})", inline=True)
+        if goal.get("end_date"):
+            embed.add_field(name="Deadline", value=goal["end_date"], inline=True)
+        if goal.get("stake_miss_count"):
+            parts = [f"Miss {goal['stake_miss_count']} → penalty"]
+            if goal.get("stake_role_id"):
+                parts.append(f"Role: <@&{goal['stake_role_id']}>")
+            embed.add_field(name="Stake", value=" | ".join(parts), inline=True)
+        if checkins:
+            recent = "\n".join(
+                f"• **{c['status'].capitalize()}** — {c['checked_at'][:10]}" + (f" — *{c['note']}*" if c.get("note") else "")
+                for c in checkins[:5]
+            )
+            embed.add_field(name="Recent Check-ins", value=recent, inline=False)
 
-        await update_goal(goal_id, **kwargs)
-        await interaction.response.send_message(
-            f"Goal **{goal['title']}** updated! ✅", ephemeral=True,
-        )
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
 
-    @app_commands.command(name="goal-delete", description="Delete a goal")
-    @app_commands.autocomplete(goal_id=goal_autocomplete)
-    @app_commands.describe(goal_id="ID of the goal to delete")
-    async def goal_delete(self, interaction: discord.Interaction, goal_id: int):
-        goal = await get_goal(goal_id)
-        if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
-            return
-
-        await delete_goal(goal_id)
-        await interaction.response.send_message(f"Goal **{goal['title']}** deleted.", ephemeral=True)
-
-    @app_commands.command(name="goal-abandon", description="Mark a goal as abandoned")
-    @app_commands.autocomplete(goal_id=goal_autocomplete)
-    @app_commands.describe(goal_id="ID of the goal to abandon")
-    async def goal_abandon(self, interaction: discord.Interaction, goal_id: int):
-        goal = await get_goal(goal_id)
-        if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
-            return
-
-        await abandon_goal(goal_id)
-        await interaction.response.send_message(
-            f"Goal **{goal['title']}** marked as abandoned.", ephemeral=True,
-        )
+    # ── Complete ────────────────────────────────────────────
 
     @app_commands.command(name="goal-complete", description="Mark a goal as completed")
     @app_commands.autocomplete(goal_id=goal_autocomplete)
-    @app_commands.describe(goal_id="ID of the goal to complete", achieved="Did you achieve your goal?")
-    async def goal_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool = True):
+    @app_commands.describe(achieved="Did you achieve your goal?")
+    async def goal_complete(self, interaction: discord.Interaction, goal_id: int = None, achieved: bool = True):
+        await require_goal(interaction, goal_id, "complete", lambda i, g: self._do_complete(i, g, achieved))
+
+    async def _do_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
             await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
             return
 
         await complete_goal(goal_id, achieved)
-
-        embed = discord.Embed(
-            title="Goal Completed! 🏆",
-            description=f"**{goal['title']}**",
-            color=discord.Color.gold(),
-        )
+        embed = discord.Embed(title="Goal Completed! 🏆", description=f"**{goal['title']}**", color=discord.Color.gold())
         embed.add_field(name="Achieved", value="✅ Yes!" if achieved else "Not this time", inline=True)
         embed.add_field(name="Final streak", value=f"{goal['current_streak']} days", inline=True)
 
         if achieved:
-            db = await get_db()
-            row = await db.execute(
+            row = await (await get_db()).execute(
                 "SELECT accountability_channel_id FROM server_config WHERE server_id = ?",
                 (str(interaction.guild_id),),
             )
@@ -258,55 +238,69 @@ class GoalsCog(commands.Cog):
                         f"Final streak: {goal['current_streak']} days!"
                     )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
 
-    @app_commands.command(name="goal-status", description="View detailed status of a goal")
+    # ── Edit ────────────────────────────────────────────────
+
+    @app_commands.command(name="goal-edit", description="Edit an existing goal")
     @app_commands.autocomplete(goal_id=goal_autocomplete)
-    @app_commands.describe(goal_id="ID of the goal")
-    async def goal_status(self, interaction: discord.Interaction, goal_id: int):
+    @app_commands.describe(title="New title", description="New description", checkin_hour="New hour (0-23)", end_date="New deadline")
+    async def goal_edit(
+        self,
+        interaction: discord.Interaction,
+        goal_id: int = None,
+        title: str = None,
+        description: str = None,
+        checkin_hour: int = None,
+        end_date: str = None,
+    ):
+        await require_goal(interaction, goal_id, "edit", lambda i, g: self._do_edit(i, g, title, description, checkin_hour, end_date))
+
+    async def _do_edit(self, interaction: discord.Interaction, goal_id: int, title, description, checkin_hour, end_date):
         goal = await get_goal(goal_id)
-        if not goal:
-            await interaction.response.send_message("Goal not found!", ephemeral=True)
+        if not goal or goal["discord_id"] != str(interaction.user.id):
+            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
             return
+        kwargs = {}
+        if title is not None: kwargs["title"] = title
+        if description is not None: kwargs["description"] = description
+        if checkin_hour is not None: kwargs["checkin_hour"] = checkin_hour
+        if end_date is not None: kwargs["end_date"] = end_date
+        if not kwargs:
+            await interaction.response.send_message("Nothing to edit.", ephemeral=True)
+            return
+        await update_goal(goal_id, **kwargs)
+        await interaction.response.edit_message(content=f"Goal **{goal['title']}** updated! ✅", embed=None, view=None)
 
-        checkins = await get_checkin_history(goal_id, limit=10)
-        stats = await get_checkin_stats(goal_id)
+    # ── Delete ──────────────────────────────────────────────
 
-        embed = discord.Embed(
-            title=goal["title"],
-            description=goal.get("description") or "",
-            color=discord.Color.blue(),
-        )
-        embed.add_field(name="Category", value=goal["category"].capitalize(), inline=True)
-        embed.add_field(name="Frequency", value=goal["frequency"].replace("_", " ").title(), inline=True)
-        embed.add_field(name="Status", value=goal["status"].capitalize(), inline=True)
-        embed.add_field(name="Current Streak", value=f"🔥 {goal['current_streak']} days", inline=True)
-        embed.add_field(name="Longest Streak", value=f"🏆 {goal['longest_streak']} days", inline=True)
-        embed.add_field(name="Freeze Tokens", value=f"🧊 {goal.get('freeze_tokens', 0)}", inline=True)
-        embed.add_field(
-            name="Consistency",
-            value=f"📊 {stats['consistency']}% ({stats['done']}/{stats['total']} check-ins)",
-            inline=True,
-        )
+    @app_commands.command(name="goal-delete", description="Delete a goal")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
+    async def goal_delete(self, interaction: discord.Interaction, goal_id: int = None):
+        await require_goal(interaction, goal_id, "delete", self._do_delete)
 
-        if goal.get("end_date"):
-            embed.add_field(name="Deadline", value=goal["end_date"], inline=True)
+    async def _do_delete(self, interaction: discord.Interaction, goal_id: int):
+        goal = await get_goal(goal_id)
+        if not goal or goal["discord_id"] != str(interaction.user.id):
+            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            return
+        await delete_goal(goal_id)
+        await interaction.response.edit_message(content=f"Goal **{goal['title']}** deleted.", embed=None, view=None)
 
-        if goal.get("stake_miss_count"):
-            parts = [f"Miss {goal['stake_miss_count']} → penalty"]
-            if goal.get("stake_role_id"):
-                parts.append(f"Role: <@&{goal['stake_role_id']}>")
-            embed.add_field(name="Stake", value=" | ".join(parts), inline=True)
+    # ── Abandon ─────────────────────────────────────────────
 
-        if checkins:
-            recent = "\n".join(
-                f"• **{c['status'].capitalize()}** — {c['checked_at'][:10]}"
-                + (f" — *{c['note']}*" if c.get("note") else "")
-                for c in checkins[:5]
-            )
-            embed.add_field(name="Recent Check-ins", value=recent or "None yet", inline=False)
+    @app_commands.command(name="goal-abandon", description="Mark a goal as abandoned")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
+    async def goal_abandon(self, interaction: discord.Interaction, goal_id: int = None):
+        await require_goal(interaction, goal_id, "abandon", self._do_abandon)
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def _do_abandon(self, interaction: discord.Interaction, goal_id: int):
+        goal = await get_goal(goal_id)
+        if not goal or goal["discord_id"] != str(interaction.user.id):
+            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            return
+        await abandon_goal(goal_id)
+        await interaction.response.edit_message(content=f"Goal **{goal['title']}** marked as abandoned.", embed=None, view=None)
 
 
 async def setup(bot: commands.Bot):
