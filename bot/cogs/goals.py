@@ -40,14 +40,15 @@ async def goal_autocomplete(interaction: discord.Interaction, current: str) -> l
 
 async def require_goal(interaction: discord.Interaction, goal_id: int | None, label: str, handler):
     if goal_id is not None:
-        return await handler(interaction, goal_id)
+        await interaction.response.defer(ephemeral=True)
+        return await handler(interaction, goal_id, from_component=False)
     goals = await get_user_goals(str(interaction.user.id), status="active")
     if not goals:
         await interaction.response.send_message(
             "You have no active goals. Use `/goal` to set one!", ephemeral=True,
         )
         return
-    view = GoalSelectView(goals, interaction.user.id, label, handler)
+    view = GoalSelectView(goals, interaction.user.id, label, lambda i, g: handler(i, g, from_component=True))
     await interaction.response.send_message("Select a goal:", view=view, ephemeral=True)
 
 
@@ -101,11 +102,8 @@ class GoalsCog(commands.Cog):
         else:
             timezone = user["timezone"]
 
-        if timezone == "UTC" and not user:
-            await interaction.followup.send(
-                "⚠️ Your timezone is set to UTC. Use `/set-timezone` to set your local time.",
-                ephemeral=True,
-            )
+        if timezone == "UTC":
+            pass
 
         goal_id = await create_goal(
             discord_id=discord_id,
@@ -153,7 +151,6 @@ class GoalsCog(commands.Cog):
                 "You have no active goals. Use `/goal` to set one!", ephemeral=True,
             )
             return
-
         embed = discord.Embed(title="Your Goals", color=discord.Color.blue())
         for g in goals:
             s = g["current_streak"]
@@ -172,10 +169,13 @@ class GoalsCog(commands.Cog):
     async def goal_status(self, interaction: discord.Interaction, goal_id: int = None):
         await require_goal(interaction, goal_id, "view", self._show_goal_status)
 
-    async def _show_goal_status(self, interaction: discord.Interaction, goal_id: int):
+    async def _show_goal_status(self, interaction: discord.Interaction, goal_id: int, from_component: bool = False):
         goal = await get_goal(goal_id)
         if not goal:
-            await interaction.response.send_message("Goal not found!", ephemeral=True)
+            if from_component:
+                await interaction.response.edit_message(content="Goal not found.", embed=None, view=None)
+            else:
+                await interaction.followup.send("Goal not found!", ephemeral=True)
             return
 
         checkins = await get_checkin_history(goal_id, limit=10)
@@ -203,20 +203,27 @@ class GoalsCog(commands.Cog):
             )
             embed.add_field(name="Recent Check-ins", value=recent, inline=False)
 
-        await interaction.response.edit_message(content=None, embed=embed, view=None)
+        if from_component:
+            await interaction.response.edit_message(content=None, embed=embed, view=None)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ── Complete ────────────────────────────────────────────
+    # ── Complete ───────────────────────────────────────────
 
     @app_commands.command(name="goal-complete", description="Mark a goal as completed")
     @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(achieved="Did you achieve your goal?")
     async def goal_complete(self, interaction: discord.Interaction, goal_id: int = None, achieved: bool = True):
-        await require_goal(interaction, goal_id, "complete", lambda i, g: self._do_complete(i, g, achieved))
+        await require_goal(interaction, goal_id, "complete", lambda i, g, fc: self._do_complete(i, g, achieved, fc))
 
-    async def _do_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool):
+    async def _do_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool, from_component: bool = False):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            msg = "Goal not found or not yours!"
+            if from_component:
+                await interaction.response.edit_message(content=msg, embed=None, view=None)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
 
         await complete_goal(goal_id, achieved)
@@ -238,7 +245,10 @@ class GoalsCog(commands.Cog):
                         f"Final streak: {goal['current_streak']} days!"
                     )
 
-        await interaction.response.edit_message(content=None, embed=embed, view=None)
+        if from_component:
+            await interaction.response.edit_message(content=None, embed=embed, view=None)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── Edit ────────────────────────────────────────────────
 
@@ -254,12 +264,16 @@ class GoalsCog(commands.Cog):
         checkin_hour: int = None,
         end_date: str = None,
     ):
-        await require_goal(interaction, goal_id, "edit", lambda i, g: self._do_edit(i, g, title, description, checkin_hour, end_date))
+        await require_goal(interaction, goal_id, "edit", lambda i, g, fc: self._do_edit(i, g, fc, title, description, checkin_hour, end_date))
 
-    async def _do_edit(self, interaction: discord.Interaction, goal_id: int, title, description, checkin_hour, end_date):
+    async def _do_edit(self, interaction: discord.Interaction, goal_id: int, from_component: bool, title, description, checkin_hour, end_date):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            msg = "Goal not found or not yours!"
+            if from_component:
+                await interaction.response.edit_message(content=msg, embed=None, view=None)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
         kwargs = {}
         if title is not None: kwargs["title"] = title
@@ -267,10 +281,18 @@ class GoalsCog(commands.Cog):
         if checkin_hour is not None: kwargs["checkin_hour"] = checkin_hour
         if end_date is not None: kwargs["end_date"] = end_date
         if not kwargs:
-            await interaction.response.send_message("Nothing to edit.", ephemeral=True)
+            msg = "Nothing to edit."
+            if from_component:
+                await interaction.response.edit_message(content=msg, embed=None, view=None)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
         await update_goal(goal_id, **kwargs)
-        await interaction.response.edit_message(content=f"Goal **{goal['title']}** updated! ✅", embed=None, view=None)
+        msg = f"Goal **{goal['title']}** updated! ✅"
+        if from_component:
+            await interaction.response.edit_message(content=msg, embed=None, view=None)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
 
     # ── Delete ──────────────────────────────────────────────
 
@@ -279,13 +301,21 @@ class GoalsCog(commands.Cog):
     async def goal_delete(self, interaction: discord.Interaction, goal_id: int = None):
         await require_goal(interaction, goal_id, "delete", self._do_delete)
 
-    async def _do_delete(self, interaction: discord.Interaction, goal_id: int):
+    async def _do_delete(self, interaction: discord.Interaction, goal_id: int, from_component: bool = False):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            msg = "Goal not found or not yours!"
+            if from_component:
+                await interaction.response.edit_message(content=msg, embed=None, view=None)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
         await delete_goal(goal_id)
-        await interaction.response.edit_message(content=f"Goal **{goal['title']}** deleted.", embed=None, view=None)
+        msg = f"Goal **{goal['title']}** deleted."
+        if from_component:
+            await interaction.response.edit_message(content=msg, embed=None, view=None)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
 
     # ── Abandon ─────────────────────────────────────────────
 
@@ -294,13 +324,21 @@ class GoalsCog(commands.Cog):
     async def goal_abandon(self, interaction: discord.Interaction, goal_id: int = None):
         await require_goal(interaction, goal_id, "abandon", self._do_abandon)
 
-    async def _do_abandon(self, interaction: discord.Interaction, goal_id: int):
+    async def _do_abandon(self, interaction: discord.Interaction, goal_id: int, from_component: bool = False):
         goal = await get_goal(goal_id)
         if not goal or goal["discord_id"] != str(interaction.user.id):
-            await interaction.response.send_message("Goal not found or not yours!", ephemeral=True)
+            msg = "Goal not found or not yours!"
+            if from_component:
+                await interaction.response.edit_message(content=msg, embed=None, view=None)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
         await abandon_goal(goal_id)
-        await interaction.response.edit_message(content=f"Goal **{goal['title']}** marked as abandoned.", embed=None, view=None)
+        msg = f"Goal **{goal['title']}** marked as abandoned."
+        if from_component:
+            await interaction.response.edit_message(content=msg, embed=None, view=None)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
