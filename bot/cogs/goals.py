@@ -26,6 +26,17 @@ FREQUENCIES = [
 ]
 
 
+async def goal_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice]:
+    goals = await get_user_goals(str(interaction.user.id), status="active")
+    return [
+        app_commands.Choice(
+            name=f"{g['title']} (🔥{g['current_streak']}d, {g['category']})"[:100],
+            value=g['id'],
+        )
+        for g in goals if current.lower() in g['title'].lower()
+    ][:25]
+
+
 class GoalsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -146,6 +157,7 @@ class GoalsCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="goal-edit", description="Edit an existing goal")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(
         goal_id="ID of the goal to edit",
         title="New title",
@@ -187,6 +199,7 @@ class GoalsCog(commands.Cog):
         )
 
     @app_commands.command(name="goal-delete", description="Delete a goal")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(goal_id="ID of the goal to delete")
     async def goal_delete(self, interaction: discord.Interaction, goal_id: int):
         goal = await get_goal(goal_id)
@@ -198,6 +211,7 @@ class GoalsCog(commands.Cog):
         await interaction.response.send_message(f"Goal **{goal['title']}** deleted.", ephemeral=True)
 
     @app_commands.command(name="goal-abandon", description="Mark a goal as abandoned")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(goal_id="ID of the goal to abandon")
     async def goal_abandon(self, interaction: discord.Interaction, goal_id: int):
         goal = await get_goal(goal_id)
@@ -211,6 +225,7 @@ class GoalsCog(commands.Cog):
         )
 
     @app_commands.command(name="goal-complete", description="Mark a goal as completed")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(goal_id="ID of the goal to complete", achieved="Did you achieve your goal?")
     async def goal_complete(self, interaction: discord.Interaction, goal_id: int, achieved: bool = True):
         goal = await get_goal(goal_id)
@@ -246,6 +261,7 @@ class GoalsCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="goal-status", description="View detailed status of a goal")
+    @app_commands.autocomplete(goal_id=goal_autocomplete)
     @app_commands.describe(goal_id="ID of the goal")
     async def goal_status(self, interaction: discord.Interaction, goal_id: int):
         goal = await get_goal(goal_id)
